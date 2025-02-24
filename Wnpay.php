@@ -1,47 +1,62 @@
 <?php
+
 /**
-**************************************************
-* 名稱: MACCMS万用支付接口模板
-* 版本: 2.0.0
-* 作者: 文尼先生
-* 站長資源: https://3dayseo.com
-* 文尼模板網: https://wntheme.com
-* 最後更新於: 2024-07-16
-**************************************************
-*/
+ **************************************************
+ * 名稱: MACCMS万用支付接口模板
+ * 版本: 3.0.0
+ * 作者: 文尼先生
+ * 站長資源: https://3dayseo.com
+ * 文尼模板網: https://wntheme.com
+ * 最後更新於: 2025-02-25
+ **************************************************
+ */
 
 namespace app\common\extend\pay;
+
 use think\Log;
 
-class Wnpay {
-
-    public $name = '在线支付';
-    public $ver = '2.0.0';
+class Wnpay
+{
+    // config
+    public $name = '文尼支付';
+    public $gateway = 'wnpay'; // unique gateway id
     public $debug = false;
     public $log = true;
 
-    public $endpoint;
-    public $merchant_id;
-    public $appid;
-    public $appkey;
+    public $channelIdKey = 'payPassAccountId';
 
-    public $pay_type;
+    // value
+    public $endpoint;
+    public $merchantId;
+    public $appId;
+    public $appKey;
+    public $payType;
+    public $productId = '8001';
+    public $signCase; // upper|lower|null
+    public $decimalMultiply = 1; // 金额小数位处理
+    public $isInt = true;
+    public $decimal = 2; // 只有在 $isInt = false 时有效
 
     /**
      * 构造函数，用于初始化支付配置。
      */
     public function __construct()
     {
-        $this->endpoint = trim($GLOBALS['config']['pay']['wnpay']['endpoint']);
-        $this->merchant_id = trim($GLOBALS['config']['pay']['wnpay']['merchant_id']);
-        $this->appid = trim($GLOBALS['config']['pay']['wnpay']['appid']);
-        $this->appkey = trim($GLOBALS['config']['pay']['wnpay']['appkey']);
-        $this->pay_type = trim($GLOBALS['config']['pay']['wnpay']['pay_type']);
+        $this->name = $this->config('display_name', $this->name);
 
-        if($this->debug || $this->log){
+        $this->endpoint = $this->config('endpoint');
+        $this->merchantId = $this->config('merchant_id');
+        $this->appId = $this->config('appid');
+        $this->appKey = $this->config('appkey');
+        $this->payType = $this->config('pay_type');
+        $this->signCase = $this->config('sign_case', $this->signCase);
+
+        // $this->debug = $this->config('debug', $this->debug);
+
+        if ($this->debug || $this->log) {
             Log::init([
                 'type' => 'File',
-                'single'=> false,
+                'single' => false,
                 'path' => LOG_PATH . '/',
                 'level' => ['sql', 'error', 'info'],
             ]);
@@ -57,54 +72,83 @@ class Wnpay {
      */
     public function submit($user, $order, $param)
     {
-        //处理订单ID
-        if($this->debug){
+        // 调试输出
+        $this->debug($user, '$user of submit()');
+        $this->debug($order, '$order of submit()');
+        $this->debug($param, '$param of submit()');
+
+        // 处理订单ID
+        if ($this->debug) {
             $order_code = "TEST" . time();
-        }else{
+        } else {
             $order_code =  $order['order_code'];
         }
 
-        $this->debug($user, 'submit() user');
-        $this->debug($order, 'submit() order');
-        $this->debug($param, 'submit() param');
+        // 金额处理
+        if ($this->isInt) {
+            // 处理金额 (单位为分 * 100)
+            $amount = (int)($order['order_price'] * $this->decimalMultiply);
+        } else {
+            $amount = number_format($order['order_price'] * $this->decimalMultiply, $this->decimal, '.', '');
+        }
 
-        //处理金额 (单位为分 * 100)
-        $amount = (int)($order['order_price'] * 100);
-
-        //构建订单数据
+        // 构建订单数据
         $data = [
-            'mchId' => $this->merchant_id,
-            'appId' => $this->appid,
-            'productId' => '8018',
             'mchOrderNo' => $order_code,
             'amount' => $amount,
-            'currency' => 'cny',
-            'notifyUrl' => $GLOBALS['http_type'] . $_SERVER['HTTP_HOST'] . '/index.php/payment/notify/pay_type/wnpay',
-            'returnUrl' => $GLOBALS['http_type'] . $_SERVER['HTTP_HOST'] . mac_url('user/upgrade'),
-            'subject' => '在线充值',
-            'body' => '积分充值（UID：'.$user['user_id'].'）',
-            'reqTime' => date('YmdHis'),
-            'version' => '1.0',
+
+            'mchId' => $this->merchantId,
+            'notifyUrl' => $GLOBALS['http_type'] . $_SERVER['HTTP_HOST'] . '/index.php/payment/notify/pay_type/' . $this->gateway,
+            'returnUrl' =>  $GLOBALS['http_type'] . $_SERVER['HTTP_HOST'] . mac_url('user/index'),
+            'productId' => $this->productId,
+            'appId' => $this->appId,
+
+            // 'currency' => 'cny',
+            // 'clientIp' => '127.0.0.1',
+            // 'device' => 'ios10.3.1',
+            // 'subject' => '测试商品1',
+            // 'description' => '测试商品描述',
+            // 'reqTime' => date('YmdHis'),
+            // 'version' => '1.0',
+            // 'param1' => '',
+            // 'param2' => '',
         ];
 
-        //生成签名数据
-        $signed_data = $this->generate_signed_data($data);
-        $this->debug($signed_data, 'POST Form body');
+        // ASCII 排序
+        ksort($data);
+        $this->debug($data, 'Sorted unsigned data');
 
-        //发送POST请求
+        // 生成签名
+        $sign = $this->sign($data);
+
+        $data['sign'] = $sign;
+
+        $this->debug($data, 'POST Form body');
+
+        // 发送POST请求
         $this->debug($this->endpoint, 'POST endpoint');
-        $res = mac_curl_post($this->endpoint, $signed_data);
+        $res = mac_curl_post($this->endpoint, $data);
         $res = json_decode($res, true);
         $this->debug($res, 'Result from endpoint');
 
-        //Debug 模式终止跳转
-        if($this->debug){
-           die;
+        // Debug 模式终止跳转
+        if ($this->debug) {
+            die;
         }
 
         //跳转到支付页面
-        $url = $res['payJumpUrl'];
-        mac_redirect($url);
+        if ($res['code'] == 200 && isset($res['data']['payUrl'])) {
+            mac_redirect($res['data']['payUrl']);
+        } 
+
+        // 失敗時處理
+        elseif($res['code'] == 400 && $res['message'] == '商户单号重复'){
+            echo "支付链接爲一次性，如不小心關閉頁面，请重新下单";
+        }
+
+        else {
+            echo "Payment request failed: " . $res['message'];
+        }
     }
 
     /**
@@ -112,79 +156,104 @@ class Wnpay {
      */
     public function notify()
     {
-        $this->debug($_POST, 'Received data in notify');
+        // 获取 JSON 请求数据
+        // $rawData = file_get_contents('php://input');
+        // $this->debug($rawData, 'Received raw JSON data in notify');
 
+        // 解析 JSON 数据
+        // $data = json_decode($rawData, true);
+        // if (!$data) {
+        //     echo 'Fail. Invalid JSON';
+        //     return;
+        // }
+
+        // Post body
         $data = $_POST;
+        $this->debug($data, 'notify() POST data');
+
+        // 签名校验
+        $received_sign = $data['sign'] ?? '';
         unset($data['sign']);
+        $sign = $this->sign($data);
 
-        $received_sign = $_POST['sign'];
-        $sign = $this->sign($data, 'generate_signed_data() in notify');
+        $paidStatus = in_array($data['status'], [2, 3]);
+        $this->debug($paidStatus, 'paidStatus');
 
-        //校验签名并处理订单
-        if (!empty($received_sign) && $received_sign == $sign) {
-            $order_id = $_POST['mchOrderNo'];
-            $res = model('Order')->notify($order_id, 'wnpay');
+        // 校验签名
+        if (!empty($received_sign) && $received_sign === $sign && $paidStatus) {
+            $order_id = $data[$this->orderNoKey];
+            $this->debug($order_id, '$order_id');
+            $res = model('Order')->notify($order_id, $this->gateway);
+            $this->debug($res, '$res');
+
             if ($res['code'] > 1) {
                 echo 'Fail. No order is updated';
             } else {
-                echo 'success';
+                echo 'success'; // 必须返回 'success'
             }
         } else {
-            $this->debug($sign, 'check sign');
-            echo 'Fail. Wrong sign';
+            $this->debug($received_sign, 'received_sign');
+            $this->debug($sign, 'calculated sign');
+            $this->debug($sign, 'Check sign failed');
+
+            if ($received_sign !== $sign) {
+                echo 'Fail. Wrong sign';
+            } elseif (!$paidStatus) {
+                echo 'Fail. Status not paid';
+            } else {
+                echo "Other other. Please check.";
+            }
         }
     }
 
     /**
-     * 生成带签名的数据
+     * 生成簽名
      * 
-     * @param $data 原始订单数据
-     * @return array 带签名的订单数据
-     */
-    public function generate_signed_data($data)
-    {
-        $this->debug($data, 'unsigned_data');
-
-        //生成签名
-        $sign = $this->sign($data);
-        $data['sign'] = $sign;
-        return $data;
-    }
-
-    /**
-     * 生成签名
-     * 
-     * @param $data 订单数据
+     * @param array $data 订单数据
      * @return string 生成的签名
      */
     public function sign($data)
     {
-        $unsiged_query_string = "";
-        $index = 0;
-        $data = array_filter($data);
+        // 删除 sign 參數，確保它不參與簽名計算
         unset($data['sign']);
+
+        // 過濾掉 `null` 值，但保留 `0`（數字零）
+        $data = array_filter($data, function ($value) {
+            return $value !== null && $value !== '';
+        });
+
+        // 按照鍵名 ASCII 升序排序
         ksort($data);
-        reset($data);
-        $this->debug($data, 'array data before sign');
+        $unsiged_query_string = http_build_query($data);
 
-        //遍历数据生成待签名字符串
-        foreach ($data as $k => $v) {
-            if($index){
-                $unsiged_query_string .= "&$k=$v";
-            }else{
-                $unsiged_query_string .= "$k=$v";
-            }
-            $index++;
-        }
-
-        //拼接密钥生成签名
-        $this->debug($this->appkey, 'key');
-        $unsiged_query_string .= "&key={$this->appkey}";
+        // 拼接 key
+        $this->debug($this->appKey, 'key');
+        $data['key'] = $this->appKey;
+        $unsiged_query_string .= "&key={$this->appKey}";
         $this->debug($unsiged_query_string, '待签名值');
 
-        $sign = strtoupper(md5($unsiged_query_string));
+        // MD5 簽名
+        $sign = md5($unsiged_query_string);
+        if($this->signCase == 'upper'){
+            $sign = strtoupper($sign);
+        }elseif($this->signCase == 'lower'){
+            $sign = strtolower($sign);
+        }
         $this->debug($sign, '签名结果');
+        
         return $sign;
+    }
+
+    /**
+     * 获取配置
+     * 
+     * @param $key 配置键
+     * @param $fallback 默认值
+     * @return mixed 配置值
+     */
+    public function config($key, $fallback = null)
+    {
+        return trim($GLOBALS['config']['pay'][$this->gateway][$key]) ?: $fallback;
     }
 
     /**
@@ -196,21 +265,22 @@ class Wnpay {
      */
     public function debug($data, $title = '', $print_mode = 'print_r')
     {
-        //记录日志
-        if($this->log || $this->debug){
+        // 记录日志
+        if ($this->log || $this->debug) {
+            Log::info($title);
             Log::info($data);
         }
 
-        //调试模式下输出调试信息
-        if($this->debug){
+        // 调试模式下输出调试信息
+        if ($this->debug) {
             echo "<pre>";
             echo "{$title}:<br>";
             if (class_exists('VarDumper')) {
                 VarDumper::dump($data);
-            }else{
-                if($print_mode == 'print_r'){
+            } else {
+                if ($print_mode == 'print_r') {
                     print_r($data);
-                }else{
+                } else {
                     var_dump($data);
                 }
             }
